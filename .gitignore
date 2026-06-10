@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+docs/
+
+# Training artifacts
+*.pt
+*.bin
+*.safetensors
+loss_log.json
+*.png
+*.wav
+
+data/

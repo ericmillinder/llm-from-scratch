@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+/.venv
+
+# PyTorch/ML
+.torch/
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+*.md
+
+# OS
+.DS_Store
+Thumbs.db
