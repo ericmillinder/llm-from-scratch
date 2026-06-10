@@ -1,19 +1,33 @@
 import json
 import math
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import save_file, save_model
 from tqdm import tqdm
 
-from app.TrainingJob import TrainingJob
 from dataset import load_alpaca_instruction_json, load_bpe_text
 from generate import generate
 from loss import plot_loss_curve
 from model import GPTConfig, GPT
+from gguf import GGUFWriter
 
 max_lr = 1e-3
 
+@dataclass
+class TrainingJob:
+    config: GPTConfig
+    model: GPT
+    optimizer: torch.optim.Optimizer
+    get_train_batch: callable
+    get_val_batch: callable
+    tokenizer: object
+    sample_prompt: str
+    checkpoint_meta: dict = None
+    batches_include_loss_mask: bool = False
+    max_steps: int = 4000
 
 def get_device():
     """
@@ -226,7 +240,7 @@ def run_training(output_dir, job: TrainingJob, starting_step=0):
             model.train()
 
         # --- save checkpoint ---
-        if step > 0 and step % 1000 == 0:
+        if step % 1000 == 0: # and step > 0:
             save_checkpoint(job, model, optimizer, output_dir, step)
 
     # --- save final checkpoint and loss log ---
@@ -249,12 +263,55 @@ def run_training(output_dir, job: TrainingJob, starting_step=0):
 def save_checkpoint(job: TrainingJob, model: GPT, optimizer, output_dir, step: int):
     torch.save({
         "step": step,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
         "config": job.config,
         "tokenizer": "gpt2",
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
     }, f"{output_dir}/checkpoint_{step}.pt")
 
+    metadata = {
+        "step": str(step),
+        "tokenizer": "gpt2",
+        "vocab_size": str(job.config.vocab_size),
+        "block_size": str(job.config.block_size),
+        "n_layer": str(job.config.n_layer),
+        "n_head": str(job.config.n_head),
+        "n_embd": str(job.config.n_embd),
+    }
+    save_model(model,  f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
+
+    save_gguf(job, model, optimizer, output_dir, step)
+
+
+def save_gguf(job: TrainingJob, model: GPT, optimizer, output_dir, step: int):
+    # 1. Define your PyTorch model or state dict
+    # (e.g., model = YourTorchModel() or torch.load("model.pth"))
+    state_dict = model.state_dict()
+
+    # 2. Initialize the GGUF writer
+    outputPath = f"{output_dir}/checkpoint_{step}.gguf"
+    writer = GGUFWriter(outputPath, arch="llama")
+
+    # 3. Add metadata descriptive fields
+    writer.add_name("A PyTorch Model")
+    writer.add_author("A. I. Developer")
+
+    # 4. Loop through weights, convert to NumPy, and write
+    for tensor_name, tensor in state_dict.items():
+        # GGUF requires data as numpy arrays
+        numpy_array = tensor.detach().cpu().numpy()
+
+        # Write tensor to file
+        writer.add_tensor(tensor_name, numpy_array)
+
+    # 5. Build and close the file
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+
+    writer.close()
+
+    print(f"Successfully saved to {outputPath}")
 
 def validate_training(job: TrainingJob, model, step: int) -> float:
     model.eval()
@@ -288,6 +345,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    sys.path.append('../')  # lame workaround to get the 'app' seen as a module for unpickle
+    print(f"PYTHONPATH = {sys.path}")
+
     training_data_path = args.dataset
     model_output_dir = args.model_output_dir
 
@@ -303,15 +363,16 @@ if __name__ == "__main__":
     else:
 
         # train(data_path, max_steps=3000)
+        # block_size = context window size and has considerable impact on performance
         # subzero: 2, 2, 64
         # tiny: 4, 4, 128
-        # (defaults) small: 6, 6, 384 --  12M char encoding | 78M BPE
+        # (defaults) small: 6, 6, 384 -- 12M char encoding | 78M BPE
         # medium: 8, 8, 512
         # BPE token encoding has affected the names for those sizes.
 
         # config's vocab size will be set during the setup
         config = GPTConfig(
-            block_size=256,
+            block_size=384,
             n_layer=6,
             n_head=6,
             n_embd=384,
