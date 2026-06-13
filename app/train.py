@@ -106,7 +106,7 @@ def init_model_from_checkpoint(checkpoint_path,
     For SFT after a pretraining model is completed.
     """
     device = get_device()
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if checkpoint["tokenizer"] != "gpt2":
         raise ValueError(f"Unsupported tokenizer: {checkpoint['tokenizer']}. Only 'gpt2' is currently supported.")
 
@@ -149,7 +149,7 @@ def resume_pretrain_run(path, output_dir, data_path, batch_size, max_steps=4000)
     :return:
     """
     device = get_device()
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
     if checkpoint["tokenizer"] != "gpt2":
         raise ValueError(f"Unsupported tokenizer: {checkpoint['tokenizer']}. Only 'gpt2' is currently supported.")
 
@@ -250,7 +250,7 @@ def run_training(output_dir, job: TrainingJob, starting_step=0):
         "config": job.config,
         "tokenizer": "gpt2"
     }, f"{output_dir}/checkpoint_final.pt")
-    save_file(model.state_dict(), f"{output_dir}/checkpoint_final.safetensors")
+    # save_file(model.state_dict(), f"{output_dir}/checkpoint_final.safetensors")
 
     with open(f"{output_dir}/loss_log.json", "w") as f:
         json.dump(loss_log, f)
@@ -313,6 +313,7 @@ def save_gguf(job: TrainingJob, model: GPT, optimizer, output_dir, step: int):
 
     print(f"Successfully saved to {outputPath}")
 
+
 def validate_training(job: TrainingJob, model, step: int) -> float:
     model.eval()
     with torch.no_grad():
@@ -341,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_output_dir", default="unnamed", help="Output directory for model checkpoints")
     parser.add_argument("--mode", default="pretrain", help="Mode to run in: pretrain, finetune, resume")
     parser.add_argument("--checkpoint", help="Path to checkpoint to resume from. Required if resuming training.")
-    parser.add_argument("--max-samples", help="Number of samples to train on.")
+    parser.add_argument("--max_samples", help="Number of samples to train on.", type=int, default=5000)
 
     args = parser.parse_args()
 
@@ -357,9 +358,9 @@ if __name__ == "__main__":
         if args.checkpoint is None:
             raise ValueError("Checkpoint path is required for resume mode")
 
-        resume_pretrain_run(args.checkpoint, model_output_dir, training_data_path, 64, max_steps=args.max_steps)
+        resume_pretrain_run(args.checkpoint, model_output_dir, training_data_path, 64, max_steps=args.max_samples)
     elif args.mode == "finetune":
-        init_model_from_checkpoint(args.checkpoint, training_data_path, model_output_dir, 4000, 64)
+        init_model_from_checkpoint(args.checkpoint, training_data_path, model_output_dir, max_steps=args.max_samples, batch_size=64)
     else:
 
         # train(data_path, max_steps=3000)
@@ -373,9 +374,17 @@ if __name__ == "__main__":
         # config's vocab size will be set during the setup
         config = GPTConfig(
             block_size=384,
-            n_layer=6,
-            n_head=6,
+            n_layer=8,
+            n_head=8,
             n_embd=384,
         )
+
+        tiny = GPTConfig(
+            block_size=64,
+            n_layer=2,
+            n_head=2,
+            n_embd=64,
+        )
+        config = tiny
 
         init_model_from_scratch(config, training_data_path, model_output_dir)

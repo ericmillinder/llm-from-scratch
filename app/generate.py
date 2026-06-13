@@ -22,7 +22,8 @@ def generate_greedy(model, idx, max_new_tokens):
 @torch.no_grad()
 def generate(model, prompt, enc, max_new_tokens=200, temperature=0.8, top_k=40):
     device = next(model.parameters()).device
-    idx = torch.tensor([enc.encode(prompt)], dtype=torch.long, device=device)
+    prompt_tokens = enc.encode(prompt)
+    idx = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
 
     model.eval()
     for _ in range(max_new_tokens):
@@ -36,9 +37,14 @@ def generate(model, prompt, enc, max_new_tokens=200, temperature=0.8, top_k=40):
 
         probs = torch.softmax(logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
+
+        print(f"next_token = {next_token.item()}")
+        if next_token.item() == enc.eot_token:
+            break
+
         idx = torch.cat([idx, next_token], dim=1)
 
-    return enc.decode(idx[0].tolist())
+    return enc.decode(idx[0, len(prompt_tokens):].tolist())
 
 
 if __name__ == "__main__":
@@ -71,6 +77,7 @@ if __name__ == "__main__":
     model.load_state_dict(checkpoint["model_state_dict"])
 
     encoder = tiktoken.get_encoding(tokenizer)
+
     output = generate(model, args.prompt, encoder,
                       max_new_tokens=args.max_new_tokens,
                       temperature=args.temperature,
