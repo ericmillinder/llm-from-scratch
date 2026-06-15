@@ -3,6 +3,7 @@ import sys
 import tiktoken
 import torch
 
+from app.dataset import format_alpaca_prompt_and_response
 from model import GPT
 
 
@@ -20,7 +21,18 @@ def generate_greedy(model, idx, max_new_tokens):
 
 
 @torch.no_grad()
-def generate(model, prompt, enc, max_new_tokens=200, temperature=0.8, top_k=40):
+def generate(model, prompt: str, enc, max_new_tokens=200, temperature=0.8, top_k=40):
+    """
+    There is no distinction between generation from a pretrain or post-trained model yet.
+
+    The pre-train model is just a next-token predictor and does not understand instructions.
+
+    So, until something changes, we will treat an input with some punctuation as an instruction
+    that needs alpaca instruction formatting.
+    """
+    if prompt.endswith(".") or prompt.endswith("?"):
+        prompt = format_alpaca_prompt_and_response(prompt)
+
     device = next(model.parameters()).device
     idx = torch.tensor([enc.encode(prompt)], dtype=torch.long, device=device)
 
