@@ -42,7 +42,7 @@ def format_alpaca_example(item):
 
 
 def format_alpaca_prompt_and_response(item):
-    if item["input"].strip():
+    if "input" in item and item["input"].strip():
         prompt = (
             f"### Instruction:\n{item['instruction'].strip()}\n\n"
             f"### Input:\n{item['input'].strip()}\n\n"

@@ -3,7 +3,7 @@ import sys
 import tiktoken
 import torch
 
-from app.dataset import format_alpaca_prompt_and_response
+from dataset import format_alpaca_prompt_and_response
 from model import GPT
 
 
@@ -31,7 +31,7 @@ def generate(model, prompt: str, enc, max_new_tokens=200, temperature=0.8, top_k
     that needs alpaca instruction formatting.
     """
     if prompt.endswith(".") or prompt.endswith("?"):
-        prompt = format_alpaca_prompt_and_response(prompt)
+        prompt, response = format_alpaca_prompt_and_response({"instruction": prompt, "output": ""})
 
     device = next(model.parameters()).device
     prompt_tokens = enc.encode(prompt)
