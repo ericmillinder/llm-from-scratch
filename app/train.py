@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from safetensors.torch import save_file, save_model
+from gguf import GGUFWriter
+from safetensors.torch import save_model
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
@@ -12,7 +13,6 @@ from dataset import load_alpaca_instruction_json, load_bpe_text
 from generate import generate
 from loss import plot_loss_curve
 from model import GPTConfig, GPT
-from gguf import GGUFWriter
 
 
 @dataclass
@@ -30,6 +30,8 @@ class TrainingJob:
     max_lr: float = 1e-3
     min_lr: float | None = None
     warmup_steps: int = 100
+    batch_size: int = 16
+    accum_steps: int = 1
 
 
 def get_device():
@@ -91,7 +93,8 @@ def init_model_from_scratch(config,
                             data_path,
                             output_dir,
                             max_steps=4000,
-                            batch_size=64):
+                            batch_size=8,
+                            accum_steps=8):
     device = get_device()
     print(f"Using device: {device}")
 
@@ -116,7 +119,9 @@ def init_model_from_scratch(config,
                                enc,
                                prompt,
                                max_steps=max_steps,
-                               max_lr=1e-3)
+                               max_lr=1e-3,
+                               batch_size=batch_size,
+                               accum_steps=accum_steps)
 
     run_training(output_dir, training_job)
 
@@ -125,7 +130,8 @@ def init_model_from_checkpoint(checkpoint_path,
                                data_path,
                                output_dir,
                                max_steps=4000,
-                               batch_size=64
+                               batch_size=8,
+                               accum_steps=8
                                ):
     """
     For SFT after a pretraining model is completed.
@@ -154,12 +160,14 @@ def init_model_from_checkpoint(checkpoint_path,
     training_job = TrainingJob(config, model, optimizer,
                                get_train_batch, get_val_batch, enc, prompt, batches_include_loss_mask=True,
                                max_steps=max_steps,
-                               max_lr=1e-4)
+                               max_lr=1e-4,
+                               batch_size=batch_size,
+                               accum_steps=accum_steps)
 
     run_training(output_dir, training_job)
 
 
-def resume_pretrain_run(path, output_dir, data_path, batch_size, max_steps=4000):
+def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     """
     Resume training from a checkpoint. Config and training setup comes from
     the checkpoint payload.
@@ -171,7 +179,7 @@ def resume_pretrain_run(path, output_dir, data_path, batch_size, max_steps=4000)
 
     :param path:
     :param data_path: path to the training data because I dont want to store it in the checkpoint
-    :param batch_size: batch size to use for training
+    :param max_steps: total number of optimization steps to perform
     :return:
     """
     device = get_device()
@@ -183,7 +191,8 @@ def resume_pretrain_run(path, output_dir, data_path, batch_size, max_steps=4000)
     if max_steps <= checkpoint['step']:
         raise ValueError(f"max_steps must be greater than the current checkpoint step ({checkpoint['step']})")
 
-    # training_type = checkpoint['training_type']
+    batch_size = checkpoint.get('batch_size', 64)
+    accum_steps = checkpoint.get('accum_steps', 1)
 
     device = get_device()
     print(f"Using device: {device}")
@@ -206,7 +215,9 @@ def resume_pretrain_run(path, output_dir, data_path, batch_size, max_steps=4000)
                                max_steps=max_steps,
                                max_lr=scheduler_config.get("max_lr", optimizer.param_groups[0]["lr"]),
                                min_lr=scheduler_config.get("min_lr"),
-                               warmup_steps=scheduler_config.get("warmup_steps", 100))
+                               warmup_steps=scheduler_config.get("warmup_steps", 100),
+                               batch_size=batch_size,
+                               accum_steps=accum_steps)
 
     checkpoint_step = checkpoint['step']
     starting_step = checkpoint_step + 1
@@ -224,7 +235,6 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
 
     model = job.model
     optimizer = job.optimizer
-
     if optimizer is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=job.max_lr, weight_decay=0.01)
 
@@ -242,34 +252,42 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
         tqdm.write(f"Resuming training from step {starting_step}")
 
     progress_bar = tqdm(range(starting_step, job.max_steps), desc="Training")
+    optimizer.zero_grad(set_to_none=True)
     for step in progress_bar:
-        batch = job.get_train_batch()
-        if job.batches_include_loss_mask:
-            x, y, loss_mask = batch
-            _, loss = model(x, y, loss_mask=loss_mask)
-        else:
-            x, y = batch
-            _, loss = model(x, y)
+        accum_loss = 0.0  # gradient accumulation loss
 
-        optimizer.zero_grad()
-        loss.backward()
+        # micro-batching to reduce memory usage
+        for _ in range(job.accum_steps):
+            batch = job.get_train_batch()
+            if job.batches_include_loss_mask:
+                x, y, loss_mask = batch
+                _, loss = model(x, y, loss_mask=loss_mask)
+            else:
+                x, y = batch
+                _, loss = model(x, y)
+            accum_loss += loss.item()
+            (loss / job.accum_steps).backward()  # does loss have a divide operand?
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
-        lr = optimizer.param_groups[0]["lr"]
+        optimizer.zero_grad(set_to_none=True)
 
-        progress_bar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.2e}")
+        lr = optimizer.param_groups[0]["lr"]
+        mean_loss = accum_loss / job.accum_steps
+
+        progress_bar.set_postfix(loss=f"{mean_loss:.4f}", lr=f"{lr:.2e}")
 
         # --- log loss ---
         loss_log["steps"].append(step)
-        loss_log["train"].append(loss.item())
-        if step % 100 == 0:
+        loss_log["train"].append(mean_loss)
+        if step % 500 == 0:
             # --- validation loss ---
             val_loss = validate_training(job, model, step)
             loss_log["val"].append(val_loss)
 
         # --- generate sample ---
-        if step > 0 and step % 100 == 0:
+        if step > 0 and step % 300 == 0:
             model.eval()
             sample = generate(model, job.sample_prompt, job.tokenizer, max_new_tokens=100, temperature=0.8)
             tqdm.write(f"\n--- Step {step} sample ---\n{sample}\n---\n")
@@ -293,6 +311,8 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
 
     plot_loss_curve(output_dir)
 
+    save_gguf(job, model, optimizer, output_dir, job.max_steps)
+
     return model
 
 
@@ -309,6 +329,8 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
             "min_lr": job.min_lr,
             "warmup_steps": job.warmup_steps,
         },
+        "batch_size": job.batch_size,
+        "accum_steps": job.accum_steps,
     }, f"{output_dir}/checkpoint_{step}.pt")
 
     metadata = {
@@ -322,7 +344,7 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
     }
     save_model(model, f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
 
-    save_gguf(job, model, optimizer, output_dir, step)
+    # save_gguf(job, model, optimizer, output_dir, step)
 
 
 def save_gguf(job: TrainingJob, model: GPT, optimizer, output_dir, step: int):
@@ -385,6 +407,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="pretrain", help="Mode to run in: pretrain, finetune, resume")
     parser.add_argument("--checkpoint", help="Path to checkpoint to resume from. Required if resuming training.")
     parser.add_argument("--max_samples", help="Number of samples to train on.", type=int, default=5000)
+    parser.add_argument("--tiny", help="Quick test with a tiny model config.", type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -400,9 +423,17 @@ if __name__ == "__main__":
         if args.checkpoint is None:
             raise ValueError("Checkpoint path is required for resume mode")
 
-        resume_pretrain_run(args.checkpoint, model_output_dir, training_data_path, 64, max_steps=args.max_samples)
+        resume_pretrain_run(args.checkpoint,
+                            model_output_dir,
+                            training_data_path,
+                            max_steps=args.max_samples)
     elif args.mode == "finetune":
-        init_model_from_checkpoint(args.checkpoint, training_data_path, model_output_dir, max_steps=args.max_samples, batch_size=64)
+        init_model_from_checkpoint(args.checkpoint,
+                                   training_data_path,
+                                   model_output_dir,
+                                   max_steps=args.max_samples,
+                                   batch_size=8,
+                                   accum_steps=8)
     else:
 
         # train(data_path, max_steps=3000)
@@ -427,6 +458,12 @@ if __name__ == "__main__":
             n_head=2,
             n_embd=64,
         )
-        config = tiny
+        if args.tiny:
+            config = tiny
 
-        init_model_from_scratch(config, training_data_path, model_output_dir)
+        init_model_from_scratch(config,
+                                training_data_path,
+                                model_output_dir,
+                                max_steps=args.max_samples,
+                                batch_size=8,
+                                accum_steps=8)
