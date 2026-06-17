@@ -14,6 +14,11 @@ from generate import generate
 from loss import plot_loss_curve
 from model import GPTConfig, GPT
 
+PRETRAIN_PROMPT = "There are five flowers in a field. What colors are they? Blue, "
+
+# dumps decoded training batch tokens to see what is getting trained.
+DEBUG_BATCH = False
+
 
 @dataclass
 class TrainingJob:
@@ -102,11 +107,10 @@ def init_model_from_scratch(config,
         data_path, config.block_size, batch_size, device
     )
 
-    prompt = "To be or not"
     config.vocab_size = vocab_size
 
     model = GPT(config).to(device)
-    print(f"\nModel: {config.n_layer}L/{config.n_head}H/{config.n_embd}D, block_size: {config.block_size}"
+    print(f"\nModel: {config.n_layer}L/{config.n_head}H/{config.n_embd}D, block_size: {config.block_size}, "
           f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
@@ -117,7 +121,7 @@ def init_model_from_scratch(config,
                                get_train_batch,
                                get_val_batch,
                                enc,
-                               prompt,
+                               PRETRAIN_PROMPT,
                                max_steps=max_steps,
                                max_lr=1e-3,
                                batch_size=batch_size,
@@ -150,15 +154,19 @@ def init_model_from_checkpoint(checkpoint_path,
         raise ValueError(f"Checkpoint vocab size ({config.vocab_size}) does not "
                          f"match dataset vocab size ({vocab_size}).")
 
-    prompt = "Which are the primary colors?"
-
     model = GPT(config).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 
-    training_job = TrainingJob(config, model, optimizer,
-                               get_train_batch, get_val_batch, enc, prompt, batches_include_loss_mask=True,
+    training_job = TrainingJob(config,
+                               model,
+                               optimizer,
+                               get_train_batch,
+                               get_val_batch,
+                               enc,
+                               "List 5 colors?",
+                               batches_include_loss_mask=True,
                                max_steps=max_steps,
                                max_lr=1e-4,
                                batch_size=batch_size,
@@ -169,8 +177,7 @@ def init_model_from_checkpoint(checkpoint_path,
 
 def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     """
-    Resume training from a checkpoint. Config and training setup comes from
-    the checkpoint payload.
+    Resume training from a checkpoint. Config and training setup comes from the checkpoint payload.
 
     Only resume numbered checkpoints. The optimizer state is not stored in the final checkpoint as
     it is not necessary for further fine-tuning.
@@ -178,8 +185,8 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     Also, the max_steps should be > than the current step in the checkpoint.
 
     :param path:
-    :param data_path: path to the training data because I dont want to store it in the checkpoint
     :param max_steps: total number of optimization steps to perform
+    :param output_dir: where the model checkpoints will be saved
     :return:
     """
     device = get_device()
@@ -211,7 +218,7 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
 
     training_job = TrainingJob(config, model, optimizer,
                                get_train_batch, get_val_batch, enc,
-                               "To be or not",
+                               PRETRAIN_PROMPT,
                                max_steps=max_steps,
                                max_lr=scheduler_config.get("max_lr", optimizer.param_groups[0]["lr"]),
                                min_lr=scheduler_config.get("min_lr"),
@@ -261,10 +268,18 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
             batch = job.get_train_batch()
             if job.batches_include_loss_mask:
                 x, y, loss_mask = batch
+                if step % 100 == 0:
+                    print(f"Processed batch {step}.\n{job.tokenizer.decode(x[0:].tolist())}")
                 _, loss = model(x, y, loss_mask=loss_mask)
             else:
                 x, y = batch
                 _, loss = model(x, y)
+
+                # This is incredibly inefficient and only for understanding what the training batch looks like.
+                if DEBUG_BATCH and step % 100 == 0:
+                    for token in x:
+                        print(f"\n---train token batch\n{job.tokenizer.decode(token.tolist())}\n---")
+
             accum_loss += loss.item()
             (loss / job.accum_steps).backward()  # does loss have a divide operand?
 
@@ -281,13 +296,13 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
         # --- log loss ---
         loss_log["steps"].append(step)
         loss_log["train"].append(mean_loss)
-        if step % 500 == 0:
+        if step > 0 and step % 200 == 0:
             # --- validation loss ---
             val_loss = validate_training(job, model, step)
             loss_log["val"].append(val_loss)
 
         # --- generate sample ---
-        if step > 0 and step % 300 == 0:
+        if step > 0 and step % 500 == 0:
             model.eval()
             sample = generate(model, job.sample_prompt, job.tokenizer, max_new_tokens=100, temperature=0.8)
             tqdm.write(f"\n--- Step {step} sample ---\n{job.sample_prompt}\n{sample}\n---\n")
@@ -398,18 +413,25 @@ def validate_training(job: TrainingJob, model, step: int) -> float:
     return val_loss
 
 
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Train a GPT model")
-    parser.add_argument("--dataset", default="../data/shakespeare.txt", help="Path to training dataset (file for now)")
+def get_args():
+    parser = argparse.ArgumentParser(description="Train a GPT2ish model")
+    parser.add_argument("--dataset", default="../data/shakespeare.txt",
+                        help="Path to training dataset (defunct right now)")
     parser.add_argument("--model_output_dir", default="unnamed", help="Output directory for model checkpoints")
     parser.add_argument("--mode", default="pretrain", help="Mode to run in: pretrain, finetune, resume")
     parser.add_argument("--checkpoint", help="Path to checkpoint to resume from. Required if resuming training.")
-    parser.add_argument("--max_samples", help="Number of samples to train on.", type=int, default=5000)
-    parser.add_argument("--size", help="Quick test with a tiny model config.", type=str, default="tiny")
+    parser.add_argument("--max_steps", help="Number of samples to train on.", type=int, default=5000)
+    parser.add_argument("--size",
+                        help="Size of the model (tiny, small, medium, large). Affects block size, layers, etc..",
+                        type=str, default="tiny")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    args = get_args()
 
     sys.path.append('../')  # lame workaround to get the 'app' seen as a module for unpickle
     print(f"PYTHONPATH = {sys.path}")
@@ -426,12 +448,12 @@ if __name__ == "__main__":
         resume_pretrain_run(args.checkpoint,
                             model_output_dir,
                             training_data_path,
-                            max_steps=args.max_samples)
+                            max_steps=args.max_steps)
     elif args.mode == "finetune":
         init_model_from_checkpoint(args.checkpoint,
                                    training_data_path,
                                    model_output_dir,
-                                   max_steps=args.max_samples,
+                                   max_steps=args.max_steps,
                                    batch_size=8,
                                    accum_steps=8)
     else:
@@ -479,6 +501,6 @@ if __name__ == "__main__":
         init_model_from_scratch(config,
                                 training_data_path,
                                 model_output_dir,
-                                max_steps=args.max_samples,
+                                max_steps=args.max_steps,
                                 batch_size=8,
                                 accum_steps=8)

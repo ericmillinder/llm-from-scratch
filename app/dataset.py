@@ -270,7 +270,7 @@ def load_bpe_text(filepath, block_size, batch_size, device):
     enc = tiktoken.get_encoding("gpt2")
 
     train_tokens, val_tokens = load_and_tokenize("roneneldan/TinyStories", enc)
-    print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}")
+    print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}. Batch size: {batch_size}.")
     train_loader = DataLoader(
         NextTokenDataset(train_tokens, block_size),
         batch_size=batch_size,
