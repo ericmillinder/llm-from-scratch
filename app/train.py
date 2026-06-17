@@ -9,7 +9,7 @@ from safetensors.torch import save_model
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-from dataset import load_alpaca_instruction_json, load_bpe_text
+from dataset import load_alpaca_instruction_json, load_bpe_text, load_bpe_text_inmem
 from generate import generate
 from loss import plot_loss_curve
 from model import GPTConfig, GPT
@@ -103,7 +103,7 @@ def init_model_from_scratch(config,
     device = get_device()
     print(f"Using device: {device}")
 
-    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text(
+    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text_inmem(
         data_path, config.block_size, batch_size, device
     )
 
@@ -415,8 +415,8 @@ def validate_training(job: TrainingJob, model, step: int) -> float:
 
 def get_args():
     parser = argparse.ArgumentParser(description="Train a GPT2ish model")
-    parser.add_argument("--dataset", default="../data/shakespeare.txt",
-                        help="Path to training dataset (defunct right now)")
+    parser.add_argument("--dataset", default="./data",
+                        help="Path to training dataset directory.")
     parser.add_argument("--model_output_dir", default="unnamed", help="Output directory for model checkpoints")
     parser.add_argument("--mode", default="pretrain", help="Mode to run in: pretrain, finetune, resume")
     parser.add_argument("--checkpoint", help="Path to checkpoint to resume from. Required if resuming training.")

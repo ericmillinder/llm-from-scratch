@@ -21,7 +21,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from preprocessing import load_and_tokenize
+from preprocessing import load_and_tokenize, prepare_model_files
 
 
 @dataclass
@@ -278,6 +278,26 @@ def load_bpe_text(filepath, block_size, batch_size, device):
     )
     val_loader = DataLoader(
         NextTokenDataset(val_tokens, block_size),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    return build_batch_getter(train_loader, device), build_batch_getter(val_loader, device), enc.n_vocab, enc
+
+
+def load_bpe_text_inmem(model_dir: str, block_size, batch_size, device, model="roneneldan/TinyStories"):
+    enc = tiktoken.get_encoding("gpt2")
+
+    train_path, val_path = prepare_model_files(model, model_dir, enc)
+    # print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}. Batch size: {batch_size}.")
+    print(f"Datasets: {train_path}, {val_path}")
+    train_loader = DataLoader(
+        MemMappedNextTokenDataset(train_path, block_size),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    val_loader = DataLoader(
+        MemMappedNextTokenDataset(val_path, block_size),
         batch_size=batch_size,
         shuffle=True,
     )
