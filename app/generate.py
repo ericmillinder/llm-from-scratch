@@ -50,7 +50,7 @@ def generate(model, prompt: str, enc, max_new_tokens=200, temperature=0.8, top_k
         probs = torch.softmax(logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
 
-        print(f"next_token = {next_token.item()}")
+        #print(f"next_token = {next_token.item()}")
         if next_token.item() == enc.eot_token:
             break
 

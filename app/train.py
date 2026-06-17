@@ -106,7 +106,7 @@ def init_model_from_scratch(config,
     config.vocab_size = vocab_size
 
     model = GPT(config).to(device)
-    print(f"Model: {config.n_layer}L/{config.n_head}H/{config.n_embd}D, "
+    print(f"\nModel: {config.n_layer}L/{config.n_head}H/{config.n_embd}D, block_size: {config.block_size}"
           f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
@@ -290,7 +290,7 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
         if step > 0 and step % 300 == 0:
             model.eval()
             sample = generate(model, job.sample_prompt, job.tokenizer, max_new_tokens=100, temperature=0.8)
-            tqdm.write(f"\n--- Step {step} sample ---\n{sample}\n---\n")
+            tqdm.write(f"\n--- Step {step} sample ---\n{job.sample_prompt}\n{sample}\n---\n")
             model.train()
 
         # --- save checkpoint ---
@@ -407,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="pretrain", help="Mode to run in: pretrain, finetune, resume")
     parser.add_argument("--checkpoint", help="Path to checkpoint to resume from. Required if resuming training.")
     parser.add_argument("--max_samples", help="Number of samples to train on.", type=int, default=5000)
-    parser.add_argument("--tiny", help="Quick test with a tiny model config.", type=bool, default=False)
+    parser.add_argument("--size", help="Quick test with a tiny model config.", type=str, default="tiny")
 
     args = parser.parse_args()
 
@@ -445,21 +445,36 @@ if __name__ == "__main__":
         # BPE token encoding has affected the names for those sizes.
 
         # config's vocab size will be set during the setup
-        config = GPTConfig(
+
+        large = GPTConfig(
+            block_size=512,
+            n_layer=8,
+            n_head=8,
+            n_embd=512,
+        )
+        medium = GPTConfig(
             block_size=384,
             n_layer=6,
             n_head=6,
             n_embd=384,
         )
-
+        small = GPTConfig(
+            block_size=128,
+            n_layer=4,
+            n_head=4,
+            n_embd=128,
+        )
         tiny = GPTConfig(
             block_size=64,
             n_layer=2,
             n_head=2,
             n_embd=64,
         )
-        if args.tiny:
-            config = tiny
+        configs = {"tiny": tiny, "medium": medium, "small": small, "large": large}
+        if args.size not in configs:
+            raise ValueError(f"Invalid config: {args.size}")
+
+        config = configs[args.size]
 
         init_model_from_scratch(config,
                                 training_data_path,

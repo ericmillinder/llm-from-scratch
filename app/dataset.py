@@ -15,10 +15,13 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
+import numpy as np
 import tiktoken
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+
+from preprocessing import load_and_tokenize
 
 
 @dataclass
@@ -81,6 +84,32 @@ class NextTokenDataset(Dataset):
         return x, y
 
 
+class MemMappedNextTokenDataset(Dataset):
+    """
+    Now your dataset size is basically limited by disk space instead of RAM.
+    """
+
+    def __init__(self, path, block_size):
+        self.data = np.memmap(
+            path,
+            dtype=np.uint16,
+            mode="r"
+        )
+        self.block_size = block_size
+
+    def __len__(self):
+        return len(self.data) - self.block_size
+
+    def __getitem__(self, idx):
+        x = torch.from_numpy(
+            self.data[idx:idx + self.block_size].astype(np.int64)
+        )
+        y = torch.from_numpy(
+            self.data[idx + 1:idx + self.block_size + 1].astype(np.int64)
+        )
+        return x, y
+
+
 class InstructionDataset(Dataset):
     """
     SFT dataset that stores raw instruction examples and tokenizes on access.
@@ -134,7 +163,7 @@ class InstructionCollator:
             total_sequence_len = len(prompt_tokens) + len(response_tokens)
             if len(prompt_tokens) > self.block_size:
                 print(
-                    "Prompt exceeds block size and will truncate before the full response fits. "
+                    "\nPrompt exceeds block size and will truncate before the full response fits. "
                     f"Prompt: {len(prompt_tokens)}\n"
                     f"Response: {len(response_tokens)}\n"
                     f"{item['example']}"
@@ -142,7 +171,7 @@ class InstructionCollator:
             elif total_sequence_len > self.block_size:
                 kept_response_tokens = max(self.block_size - len(prompt_tokens), 0)
                 print(
-                    "Response is being truncated by the prompt length. "
+                    "\nResponse is being truncated by the prompt length. "
                     f"Prompt: {len(prompt_tokens)}\n"
                     f"Response: {len(response_tokens)}\n"
                     f"Kept response tokens: {kept_response_tokens}\n"
@@ -240,13 +269,8 @@ def load_alpaca_instruction_json(filepath, block_size, batch_size, device):
 def load_bpe_text(filepath, block_size, batch_size, device):
     enc = tiktoken.get_encoding("gpt2")
 
-    with open(filepath, "r") as f:
-        text = f.read()
-
-    tokens = torch.tensor(enc.encode(text), dtype=torch.long)
-    print(f"Dataset: {len(tokens):,} tokens, vocab size: {enc.n_vocab}")
-
-    train_tokens, val_tokens = split_train_val(tokens)
+    train_tokens, val_tokens = load_and_tokenize("roneneldan/TinyStories", enc)
+    print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}")
     train_loader = DataLoader(
         NextTokenDataset(train_tokens, block_size),
         batch_size=batch_size,
