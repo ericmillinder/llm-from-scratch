@@ -9,7 +9,7 @@ from safetensors.torch import save_model
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-from dataset import load_alpaca_instruction_json, load_bpe_text, load_bpe_text_inmem
+from dataset import load_alpaca_instruction_json, load_bpe_text_memmapped
 from generate import generate
 from loss import plot_loss_curve
 from model import GPTConfig, GPT
@@ -31,6 +31,7 @@ class TrainingJob:
     sample_prompt: str
     checkpoint_meta: dict = None
     batches_include_loss_mask: bool = False
+    lr_decay_horizon: int = 20000  # the largest planned training run. Will skew LR of shorter runs but allow longer resumes.
     max_steps: int = 4000
     max_lr: float = 1e-3
     min_lr: float | None = None
@@ -50,24 +51,27 @@ def get_device():
     return torch.device("cpu")
 
 
-def build_lr_scheduler(optimizer, max_steps: int, max_lr: float, min_lr: float | None, warmup_steps: int):
+def build_lr_scheduler(optimizer, lr_decay_steps: int, max_lr: float, min_lr: float | None, warmup_steps: int):
     """
     Build the LR schedule used for both fresh runs and resumed runs.
 
     Warmup is linear from `max_lr / warmup_steps` to `max_lr`. After warmup,
     cosine decay moves toward `min_lr`. For very short runs, the function falls
     back to a single-stage scheduler rather than constructing an invalid chain.
+
+    :param:lr_decay_steps: A large horizon to base the scheduler's decay on. Separates the scheduler from experimental training runs.
+
     """
-    if max_steps <= 0:
+    if lr_decay_steps <= 0:
         raise ValueError("max_steps must be positive")
 
     min_lr = min_lr if min_lr is not None else max_lr * 0.1
-    warmup_steps = max(0, min(warmup_steps, max_steps))
+    warmup_steps = max(0, min(warmup_steps, lr_decay_steps))
 
     if warmup_steps == 0:
-        return CosineAnnealingLR(optimizer, T_max=max_steps, eta_min=min_lr)
+        return CosineAnnealingLR(optimizer, T_max=lr_decay_steps, eta_min=min_lr)
 
-    if warmup_steps >= max_steps:
+    if warmup_steps >= lr_decay_steps:
         return LinearLR(
             optimizer,
             start_factor=1.0 / warmup_steps,
@@ -83,14 +87,15 @@ def build_lr_scheduler(optimizer, max_steps: int, max_lr: float, min_lr: float |
     )
     cosine = CosineAnnealingLR(
         optimizer,
-        T_max=max_steps - warmup_steps,
+
+        T_max=lr_decay_steps - warmup_steps,
         eta_min=min_lr,
     )
     hold = ConstantLR(optimizer, factor=1.0, total_iters=0)
     return SequentialLR(
         optimizer,
         schedulers=[warmup, hold, cosine],
-        milestones=[warmup_steps, warmup_steps],
+        milestones=[warmup_steps, warmup_steps]
     )
 
 
@@ -103,7 +108,7 @@ def init_model_from_scratch(config,
     device = get_device()
     print(f"Using device: {device}")
 
-    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text_inmem(
+    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text_memmapped(
         data_path, config.block_size, batch_size, device
     )
 
@@ -184,6 +189,9 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
 
     Also, the max_steps should be > than the current step in the checkpoint.
 
+    When max_steps changes from what is stored in the model, the learning rate schedule will be
+    rebuilt based on the new max_steps.
+
     :param path:
     :param max_steps: total number of optimization steps to perform
     :param output_dir: where the model checkpoints will be saved
@@ -198,13 +206,13 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     if max_steps <= checkpoint['step']:
         raise ValueError(f"max_steps must be greater than the current checkpoint step ({checkpoint['step']})")
 
-    batch_size = checkpoint.get('batch_size', 64)
-    accum_steps = checkpoint.get('accum_steps', 1)
+    batch_size = checkpoint.get('batch_size', 8)
+    accum_steps = checkpoint.get('accum_steps', 8)
 
     device = get_device()
     print(f"Using device: {device}")
 
-    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text(
+    get_train_batch, get_val_batch, vocab_size, enc = load_bpe_text_memmapped(
         data_path, config.block_size, batch_size, device
     )
 
@@ -214,7 +222,11 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
     optimizer.load_state_dict(optimizer_state_dict)
 
+    print("Model and optimizer loaded from checkpoint")
+    print(f"Checkpoint state\n{config}")
+
     scheduler_config = checkpoint.get("scheduler_config", {})
+    schedule_state_dict = checkpoint.get("scheduler_state_dict")
 
     training_job = TrainingJob(config, model, optimizer,
                                get_train_batch, get_val_batch, enc,
@@ -226,14 +238,13 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
                                batch_size=batch_size,
                                accum_steps=accum_steps)
 
-    checkpoint_step = checkpoint['step']
-    starting_step = checkpoint_step + 1
+    starting_step = checkpoint['step'] + 1
 
     run_training(
         output_dir,
         training_job,
         starting_step,
-        scheduler_state_dict=checkpoint.get("scheduler_state_dict"),
+        scheduler_state_dict=schedule_state_dict,
     )
 
 
@@ -247,7 +258,7 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
 
     scheduler = build_lr_scheduler(
         optimizer,
-        max_steps=job.max_steps,
+        lr_decay_steps=job.lr_decay_horizon,
         max_lr=job.max_lr,
         min_lr=job.min_lr,
         warmup_steps=job.warmup_steps,
@@ -309,10 +320,10 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
             model.train()
 
         # --- save checkpoint ---
-        if step % 1000 == 0:  # and step > 0:
+        if (step + 1) % 1000 == 0 and step > 0:
             save_checkpoint(job, model, optimizer, scheduler, output_dir, step)
 
-    # --- save final checkpoint and loss log ---
+    # --- save final checkpoint (without checkpoint state) and loss log ---
     torch.save({
         "step": job.max_steps,
         "model_state_dict": model.state_dict(),
@@ -326,7 +337,7 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
 
     plot_loss_curve(output_dir)
 
-    save_gguf(job, model, optimizer, output_dir, job.max_steps)
+    # save_gguf(job, model, optimizer, output_dir, job.max_steps)
 
     return model
 
@@ -340,6 +351,7 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "scheduler_config": {
+            "max_steps": job.max_steps,
             "max_lr": job.max_lr,
             "min_lr": job.min_lr,
             "warmup_steps": job.warmup_steps,

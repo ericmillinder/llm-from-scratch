@@ -12,7 +12,6 @@ training loop in `train.py` does not need a broader interface change.
 """
 
 import json
-from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
@@ -21,72 +20,15 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from preprocessing import load_and_tokenize, prepare_model_files
-
-
-@dataclass
-class PromptData:
-    instruction: str
-    input: str
-    output: str
-
-
-def format_alpaca_example(item):
-    if item["input"].strip():
-        return (
-            f"### Instruction:\n{item['instruction'].strip()}\n\n"
-            f"### Input:\n{item['input'].strip()}\n\n"
-            f"### Response:\n{item['output'].strip()}"
-        )
-    return (
-        f"### Instruction:\n{item['instruction'].strip()}\n\n"
-        f"### Response:\n{item['output'].strip()}"
-    )
-
-
-def format_alpaca_prompt_and_response(item):
-    if "input" in item and item["input"].strip():
-        prompt = (
-            f"### Instruction:\n{item['instruction'].strip()}\n\n"
-            f"### Input:\n{item['input'].strip()}\n\n"
-            f"### Response:\n"
-        )
-    else:
-        prompt = (
-            f"### Instruction:\n{item['instruction'].strip()}\n\n"
-            f"### Response:\n"
-        )
-
-    response = item["output"].strip()
-    return prompt, response
-
-
-class NextTokenDataset(Dataset):
-    """
-    Pretraining dataset for next-token prediction over a single token stream.
-
-    Each item is a contiguous window of `block_size` input tokens and the same
-    window shifted by one position as targets.
-    """
-
-    def __init__(self, tokens: Tensor, block_size: int):
-        if len(tokens) <= block_size:
-            raise ValueError(f"Expected more than {block_size} tokens, found {len(tokens)}")
-        self.tokens = tokens
-        self.block_size = block_size
-
-    def __len__(self):
-        return len(self.tokens) - self.block_size
-
-    def __getitem__(self, idx):
-        x = self.tokens[idx:idx + self.block_size]
-        y = self.tokens[idx + 1:idx + self.block_size + 1]
-        return x, y
+from alpaca_formatting import format_alpaca_prompt_and_response, format_alpaca_example
+from preprocessing import prepare_model_files
 
 
 class MemMappedNextTokenDataset(Dataset):
     """
     Now your dataset size is basically limited by disk space instead of RAM.
+
+    Expects the data to be a file containing a sequence of uint16 tokens.
     """
 
     def __init__(self, path, block_size):
@@ -266,43 +208,46 @@ def load_alpaca_instruction_json(filepath, block_size, batch_size, device):
     return build_batch_getter(train_loader, device), build_batch_getter(val_loader, device), enc.n_vocab, enc
 
 
-def load_bpe_text(filepath, block_size, batch_size, device):
-    enc = tiktoken.get_encoding("gpt2")
+def build_memmap_batch_getter(path: str, block_size: int, batch_size: int, device):
+    """
+    Replicates the MemMappedNextTokenDataset. Performs random sampling.
 
-    train_tokens, val_tokens = load_and_tokenize("roneneldan/TinyStories", enc)
-    print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}. Batch size: {batch_size}.")
-    train_loader = DataLoader(
-        NextTokenDataset(train_tokens, block_size),
-        batch_size=batch_size,
-        shuffle=True,
-    )
-    val_loader = DataLoader(
-        NextTokenDataset(val_tokens, block_size),
-        batch_size=batch_size,
-        shuffle=True,
-    )
+    Beware if you want to use this to consume the entire dataset, as it will sample with replacement.
+    """
+    data = np.memmap(path, dtype=np.uint16, mode="r")
+    max_start = len(data) - block_size - 1
 
-    return build_batch_getter(train_loader, device), build_batch_getter(val_loader, device), enc.n_vocab, enc
+    if max_start <= 0:
+        raise ValueError(f"Expected more than {block_size + 1} tokens, found {len(data)}")
 
+    def get_batch():
+        starts = torch.randint(0, max_start, (batch_size,)).tolist()
 
-def load_bpe_text_inmem(model_dir: str, block_size, batch_size, device, model="roneneldan/TinyStories"):
+        x = torch.empty((batch_size, block_size), dtype=torch.long)
+        y = torch.empty((batch_size, block_size), dtype=torch.long)
+
+        for row, start in enumerate(starts):
+            x[row] = torch.from_numpy(
+                data[start:start + block_size].astype(np.int64)
+            )
+            y[row] = torch.from_numpy(
+                data[start + 1:start + block_size + 1].astype(np.int64)
+            )
+
+        return x.to(device), y.to(device)
+
+    return get_batch
+
+def load_bpe_text_memmapped(model_dir: str, block_size, batch_size, device, model="roneneldan/TinyStories"):
     enc = tiktoken.get_encoding("gpt2")
 
     train_path, val_path = prepare_model_files(model, model_dir, enc)
     # print(f"Dataset: {len(train_tokens):,} tokens, vocab size: {enc.n_vocab}. Batch size: {batch_size}.")
     print(f"Datasets: {train_path}, {val_path}")
-    train_loader = DataLoader(
-        MemMappedNextTokenDataset(train_path, block_size),
-        batch_size=batch_size,
-        shuffle=True,
-    )
-    val_loader = DataLoader(
-        MemMappedNextTokenDataset(val_path, block_size),
-        batch_size=batch_size,
-        shuffle=True,
-    )
+    train_loader = build_memmap_batch_getter(train_path, block_size, batch_size, device)
+    val_loader = build_memmap_batch_getter(val_path, block_size, batch_size, device)
 
-    return build_batch_getter(train_loader, device), build_batch_getter(val_loader, device), enc.n_vocab, enc
+    return train_loader, val_loader, enc.n_vocab, enc
 
 
 def populate_loss_mask(full_tokens, loss_mask: Tensor, prompt_tokens, seq_len: int):

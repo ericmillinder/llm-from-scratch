@@ -21,7 +21,7 @@ def generate_greedy(model, idx, max_new_tokens):
 
 
 @torch.no_grad()
-def generate(model, prompt: str, enc, max_new_tokens=200, temperature=0.8, top_k=40):
+def generate(model, prompt: str, enc, max_new_tokens=512, temperature=0.8, top_k=40):
     """
     There is no distinction between generation from a pretrain or post-trained model yet.
 
@@ -94,4 +94,5 @@ if __name__ == "__main__":
                       max_new_tokens=args.max_new_tokens,
                       temperature=args.temperature,
                       top_k=args.top_k)
+    print(args.prompt)
     print(output)
