@@ -223,7 +223,7 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
     optimizer.load_state_dict(optimizer_state_dict)
 
     print("Model and optimizer loaded from checkpoint")
-    print(f"Checkpoint state\n{config}")
+    # print(f"Checkpoint state\n\t{checkpoint}")
 
     scheduler_config = checkpoint.get("scheduler_config", {})
     schedule_state_dict = checkpoint.get("scheduler_state_dict")
@@ -280,6 +280,12 @@ def run_training(output_dir, job: TrainingJob, completed_steps=0, scheduler_stat
 
     if completed_steps > 0:
         tqdm.write(f"Resuming training with {completed_steps} completed steps.")
+        if Path(f"{output_dir}/loss_log.json").exists():
+            with open(f"{output_dir}/loss_log.json", "r") as f:
+                loss_log = json.load(f)
+            print("Loaded existing loss log.")
+        else:
+            print("No existing loss log found.")
 
     progress_bar = tqdm(range(completed_steps, job.max_steps), desc="Training")
     optimizer.zero_grad(set_to_none=True)
@@ -374,6 +380,11 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
         "accum_steps": job.accum_steps,
     }, f"{output_dir}/checkpoint_{step}.pt")
 
+
+def save_checkpoint_safetensors(job: TrainingJob, model: GPT, optimizer, scheduler, output_dir, step: int):
+    """
+    Saves the model checkpoint in the safetensors format. The metadata is flat
+    """
     metadata = {
         "step": str(step),
         "tokenizer": "gpt2",
@@ -383,7 +394,7 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
         "n_head": str(job.config.n_head),
         "n_embd": str(job.config.n_embd),
     }
-    # save_model(model, f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
+    save_model(model, f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
 
     # save_gguf(job, model, optimizer, output_dir, step)
 
