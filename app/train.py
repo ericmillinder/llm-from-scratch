@@ -238,17 +238,29 @@ def resume_pretrain_run(path, output_dir, data_path, max_steps=4000):
                                batch_size=batch_size,
                                accum_steps=accum_steps)
 
-    starting_step = checkpoint['step'] + 1
+    completed_steps = checkpoint['step']
 
     run_training(
         output_dir,
         training_job,
-        starting_step,
+        completed_steps,
         scheduler_state_dict=schedule_state_dict,
     )
 
 
-def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_dict=None):
+def run_training(output_dir, job: TrainingJob, completed_steps=0, scheduler_state_dict=None):
+    """
+    The training loop for a given training job.
+    Saves the model checkpoints at intervals.
+    Saves a final checkpoint at the job.max_steps.
+
+    :param output_dir: (str) The directory to save the model checkpoints.
+    :param job: (TrainingJob) The training job configuration.
+    :param completed_steps: (int) The number of steps already completed.
+    :param scheduler_state_dict: (dict) The state dictionary of the learning rate scheduler.
+
+    Returns: None
+    """
     loss_log = {"steps": [], "train": [], "val": []}
 
     model = job.model
@@ -266,12 +278,12 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
     if scheduler_state_dict is not None:
         scheduler.load_state_dict(scheduler_state_dict)
 
-    if starting_step > 0:
-        tqdm.write(f"Resuming training from step {starting_step}")
+    if completed_steps > 0:
+        tqdm.write(f"Resuming training with {completed_steps} completed steps.")
 
-    progress_bar = tqdm(range(starting_step, job.max_steps), desc="Training")
+    progress_bar = tqdm(range(completed_steps, job.max_steps), desc="Training")
     optimizer.zero_grad(set_to_none=True)
-    for step in progress_bar:
+    for _ in progress_bar:
         accum_loss = 0.0  # gradient accumulation loss
 
         # micro-batching to reduce memory usage
@@ -279,15 +291,13 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
             batch = job.get_train_batch()
             if job.batches_include_loss_mask:
                 x, y, loss_mask = batch
-                if step % 100 == 0:
-                    print(f"Processed batch {step}.\n{job.tokenizer.decode(x[0:].tolist())}")
                 _, loss = model(x, y, loss_mask=loss_mask)
             else:
                 x, y = batch
                 _, loss = model(x, y)
 
                 # This is incredibly inefficient and only for understanding what the training batch looks like.
-                if DEBUG_BATCH and step % 100 == 0:
+                if DEBUG_BATCH and completed_steps % 100 == 0:
                     for token in x:
                         print(f"\n---train token batch\n{job.tokenizer.decode(token.tolist())}\n---")
 
@@ -299,33 +309,37 @@ def run_training(output_dir, job: TrainingJob, starting_step=0, scheduler_state_
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
 
+        # completed_steps is separated from the progress bar. It tracks the number of optimizer steps completed.
+        completed_steps += 1
+
         lr = optimizer.param_groups[0]["lr"]
         mean_loss = accum_loss / job.accum_steps
 
         progress_bar.set_postfix(loss=f"{mean_loss:.4f}", lr=f"{lr:.2e}")
 
         # --- log loss ---
-        loss_log["steps"].append(step)
+        loss_log["steps"].append(completed_steps)
         loss_log["train"].append(mean_loss)
-        if step > 0 and step % 200 == 0:
+        if completed_steps % 200 == 0:
             # --- validation loss ---
-            val_loss = validate_training(job, model, step)
+            val_loss = validate_training(job, model, completed_steps)
             loss_log["val"].append(val_loss)
 
+
         # --- generate sample ---
-        if step > 0 and step % 500 == 0:
+        if completed_steps % 500 == 0:
             model.eval()
             sample = generate(model, job.sample_prompt, job.tokenizer, max_new_tokens=100, temperature=0.8)
-            tqdm.write(f"\n--- Step {step} sample ---\n{job.sample_prompt}\n{sample}\n---\n")
+            tqdm.write(f"\n--- Step {completed_steps} sample ---\n{job.sample_prompt}\n{sample}\n---\n")
             model.train()
 
         # --- save checkpoint ---
-        if (step + 1) % 1000 == 0 and step > 0:
-            save_checkpoint(job, model, optimizer, scheduler, output_dir, step)
+        if completed_steps % 1000 == 0:
+            save_checkpoint(job, model, optimizer, scheduler, output_dir, completed_steps)
 
-    # --- save final checkpoint (without checkpoint state) and loss log ---
+    # --- save final checkpoint (without full checkpoint state) and loss log ---
     torch.save({
-        "step": job.max_steps,
+        "step": completed_steps,
         "model_state_dict": model.state_dict(),
         "config": job.config,
         "tokenizer": "gpt2"
@@ -369,7 +383,7 @@ def save_checkpoint(job: TrainingJob, model: GPT, optimizer, scheduler, output_d
         "n_head": str(job.config.n_head),
         "n_embd": str(job.config.n_embd),
     }
-    save_model(model, f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
+    # save_model(model, f"{output_dir}/checkpoint_{step}.safetensors", metadata=metadata)
 
     # save_gguf(job, model, optimizer, output_dir, step)
 
