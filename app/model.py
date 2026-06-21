@@ -15,6 +15,16 @@ class GPTConfig:
         n_layer (int): The number of transformer blocks, default is 6.
         n_head (int): The number of attention heads, default is 6.
         n_embd (int): The embedding dimension, default is 384.
+
+    A good mental model:
+        * increase block_size when you need longer dependencies.
+        * increase n_embd when you need more representational capacity.
+        * increase n_layer when you need more depth/computation per token.
+        * increase n_head mostly to improve how attention is partitioned--but keep per-head dimension reasonable.
+
+    When should they differ?
+     n_embd != block_size: almost always. These represent different things. There is no reason for them to match.
+     n_layer != n_head: also common. Depth and number of heads solve different problems.
     """
     vocab_size: int = 65  # character-level: 65 unique chars in Shakespeare
     block_size: int = 256  # max sequence length (context window)

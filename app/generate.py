@@ -21,7 +21,7 @@ def generate_greedy(model, idx, max_new_tokens):
 
 
 @torch.no_grad()
-def generate(model, prompt: str, enc, max_new_tokens=512, temperature=0.8, top_k=40):
+def generate(model, prompt: str, enc, max_new_tokens=2048, temperature=0.8, top_k=40):
     """
     There is no distinction between generation from a pretrain or post-trained model yet.
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default="small-gpt2/checkpoint_final.pt",
                         help="Path to checkpoint file (e.g. checkpoint_final.pt)")
     parser.add_argument("--prompt", default="Shall I compare thee to a", help="Starting text for generation")
-    parser.add_argument("--max_new_tokens", type=int, default=200, help="Number of tokens to generate")
+    parser.add_argument("--max_tokens", type=int, default=200, help="Number of tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.8,
                         help="Sampling temperature (lower = more deterministic)")
     parser.add_argument("--top_k", type=int, default=40, help="Only sample from top-k most likely tokens")
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     encoder = tiktoken.get_encoding(tokenizer)
 
     output = generate(model, args.prompt, encoder,
-                      max_new_tokens=args.max_new_tokens,
+                      max_new_tokens=args.max_tokens,
                       temperature=args.temperature,
                       top_k=args.top_k)
     print(args.prompt)

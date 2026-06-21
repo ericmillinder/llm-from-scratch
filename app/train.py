@@ -505,6 +505,13 @@ if __name__ == "__main__":
 
         # config's vocab size will be set during the setup
 
+        # huge for a macbook
+        huge = GPTConfig(
+            block_size=1024,
+            n_layer=12,
+            n_head=12,
+            n_embd=768,
+        )
         large = GPTConfig(
             block_size=512,
             n_layer=8,
@@ -529,7 +536,7 @@ if __name__ == "__main__":
             n_head=2,
             n_embd=64,
         )
-        configs = {"tiny": tiny, "medium": medium, "small": small, "large": large}
+        configs = {"tiny": tiny, "medium": medium, "small": small, "large": large, "huge": huge}
         if args.size not in configs:
             raise ValueError(f"Invalid config: {args.size}")
 
