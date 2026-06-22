@@ -6,9 +6,11 @@ random contiguous windows. Supervised fine-tuning uses Alpaca-style instruction
 examples, where prompts and responses are tokenized separately so batches can
 mask out prompt tokens from the loss.
 
-The module now uses `Dataset` and `DataLoader` internally, but still returns
-closure-based `get_train_batch` / `get_val_batch` functions so the existing
+The module now uses `Dataset` and `DataLoader` internally but still returns
+closure-based `get_train_batch` / `get_val_batch` functions, so the existing
 training loop in `train.py` does not need a broader interface change.
+
+This could use some cleaning.
 """
 
 import json
@@ -48,6 +50,39 @@ class MemMappedNextTokenDataset(Dataset):
         )
         y = torch.from_numpy(
             self.data[idx + 1:idx + self.block_size + 1].astype(np.int64)
+        )
+        return x, y
+
+
+class SequentialMemMappedNextTokenDataset(Dataset):
+    """
+    Deterministic next-token evaluation dataset over a memmapped token stream.
+
+    Windows advance by `stride` tokens so evaluation is stable across runs and
+    does not sample with replacement.
+    """
+
+    def __init__(self, path: str, block_size: int, stride: int | None = None):
+        self.data = np.memmap(path, dtype=np.uint16, mode="r")
+        self.block_size = block_size
+        self.stride = stride or block_size
+
+        max_start = len(self.data) - self.block_size - 1
+        if max_start <= 0:
+            raise ValueError(f"Expected more than {block_size + 1} tokens, found {len(self.data)}")
+
+        self.starts = list(range(0, max_start + 1, self.stride))
+
+    def __len__(self):
+        return len(self.starts)
+
+    def __getitem__(self, idx):
+        start = self.starts[idx]
+        x = torch.from_numpy(
+            self.data[start:start + self.block_size].astype(np.int64)
+        )
+        y = torch.from_numpy(
+            self.data[start + 1:start + self.block_size + 1].astype(np.int64)
         )
         return x, y
 
@@ -248,6 +283,36 @@ def load_bpe_text_memmapped(model_dir: str, block_size, batch_size, device, mode
     val_loader = build_memmap_batch_getter(val_path, block_size, batch_size, device)
 
     return train_loader, val_loader, enc.n_vocab, enc
+
+
+def build_memmap_eval_loader(path: str, block_size: int, batch_size: int, stride: int | None = None):
+    dataset = SequentialMemMappedNextTokenDataset(path, block_size, stride=stride)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
+def load_bpe_text_eval_loader(model_dir: str, block_size: int, batch_size: int,
+                              model="roneneldan/TinyStories", stride: int | None = None):
+    enc = tiktoken.get_encoding("gpt2")
+    _, val_path = prepare_model_files(model, model_dir, enc)
+    val_loader = build_memmap_eval_loader(val_path, block_size, batch_size, stride=stride)
+    return val_loader, enc.n_vocab, enc
+
+
+def load_alpaca_instruction_eval_loader(filepath: str, block_size: int, batch_size: int):
+    with open(filepath, "r") as f:
+        data = json.load(f)
+
+    enc = tiktoken.get_encoding("gpt2")
+    _, val_examples = split_train_val(data)
+    collator = InstructionCollator(block_size=block_size, pad_token=enc.eot_token)
+    val_loader = DataLoader(
+        InstructionDataset(val_examples, block_size, enc),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collator,
+    )
+
+    return val_loader, enc.n_vocab, enc
 
 
 def populate_loss_mask(full_tokens, loss_mask: Tensor, prompt_tokens, seq_len: int):
