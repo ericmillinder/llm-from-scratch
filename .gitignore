@@ -19,3 +19,5 @@ loss_log.json
 *.wav
 
 data/
+analysis/
+models/

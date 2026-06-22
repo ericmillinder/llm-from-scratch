@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass
@@ -57,7 +58,7 @@ class GPT(nn.Module):
         # weight tying: the output projection shares weights with the token embeddings
         self.transformer.wte.weight = self.lm_head.weight
 
-    def forward(self, idx, targets=None, loss_mask=None):
+    def forward(self, idx, targets=None, loss_mask=None, output_attentions=False, output_hidden_states=False):
         """
         Forward pass through the transformer model. This method computes the logits for the given input tokens
         and optionally computes the loss if targets are provided.
@@ -70,9 +71,19 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos)  # (T, n_embd)
         x = tok_emb + pos_emb  # (B, T, n_embd) — broadcasting adds position info
 
+        hidden_states = [] if output_hidden_states else None
+        attentions = [] if output_attentions else None
+
         # The type is ModuleList. The ModuleDict could be replaced with a small type safe module
         for block in self.transformer.h:
-            x = block(x)
+            if output_attentions:
+                x, attn = block(x, return_attention=True)
+                attentions.append(attn)
+            else:
+                x = block(x)
+
+            if output_hidden_states:
+                hidden_states.append(x)
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)
@@ -90,6 +101,18 @@ class GPT(nn.Module):
                 loss = (per_token_loss * loss_mask).sum() / loss_mask.sum().clamp_min(1.0)
             else:
                 loss = per_token_loss.mean()
+
+        outputs = {
+            "logits": logits,
+            "loss": loss,
+        }
+        if output_hidden_states:
+            outputs["hidden_states"] = hidden_states
+        if output_attentions:
+            outputs["attentions"] = attentions
+
+        if output_attentions or output_hidden_states:
+            return outputs
 
         return logits, loss
 
@@ -110,7 +133,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
-    def forward(self, x):
+    def forward(self, x, return_attention=False):
         """
         Q = query projection
         K = key projection
@@ -126,13 +149,28 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
 
-        # attention with causal mask (each token can only attend to previous tokens)
-        y = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, is_causal=True
-        )
+        attn_weights = None
+        if return_attention:
+            scale = 1.0 / math.sqrt(head_dim)
+            att = (q @ k.transpose(-2, -1)) * scale
+            causal_mask = torch.triu(
+                torch.ones(T, T, device=x.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            att = att.masked_fill(causal_mask, float("-inf"))
+            attn_weights = torch.softmax(att, dim=-1)
+            y = attn_weights @ v
+        else:
+            # attention with causal mask (each token can only attend to previous tokens)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=True
+            )
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y)
+        y = self.c_proj(y)
+        if return_attention:
+            return y, attn_weights
+        return y
 
 
 class MLP(nn.Module):
@@ -169,7 +207,13 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
+    def forward(self, x, return_attention=False):
+        if return_attention:
+            attn_out, attn_weights = self.attn(self.ln_1(x), return_attention=True)
+            x = x + attn_out  # attention with residual connection
+            x = x + self.mlp(self.ln_2(x))  # MLP with residual connection
+            return x, attn_weights
+
         x = x + self.attn(self.ln_1(x))  # attention with residual connection
         x = x + self.mlp(self.ln_2(x))  # MLP with residual connection
         return x
