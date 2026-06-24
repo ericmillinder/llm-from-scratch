@@ -9,15 +9,15 @@ from safetensors.torch import save_model
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 
-from dataset import load_alpaca_instruction_json, load_bpe_text_memmapped
-from generate import generate
-from loss import plot_loss_curve
-from model import GPTConfig, GPT
+from app.dataset_loaders import load_alpaca_instruction_json, load_bpe_text_memmapped
+from app.generate import generate
+from app.loss import plot_loss_curve
+from app.model import GPTConfig, GPT
 
 PRETRAIN_PROMPT = "There are five flowers in a field. What colors are they? Blue, "
 
 # dumps decoded training batch tokens to see what is getting trained.
-DEBUG_BATCH = False
+DEBUG_BATCH = True
 
 
 @dataclass

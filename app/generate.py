@@ -3,8 +3,8 @@ import sys
 import tiktoken
 import torch
 
-from dataset import format_alpaca_prompt_and_response
-from model import GPT
+from app.dataset.instruction import format_alpaca_prompt_and_response
+from app.model import GPT
 
 
 def generate_greedy(model, idx, max_new_tokens):

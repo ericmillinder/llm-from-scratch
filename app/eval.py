@@ -13,10 +13,10 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.append(str(APP_DIR))
 
-from dataset import load_alpaca_instruction_eval_loader, load_bpe_text_eval_loader
-from generate import generate
-from model import GPT
-from train import get_device
+from app.dataset_loaders import load_alpaca_instruction_eval_loader, load_bpe_text_eval_loader
+from app.generate import generate
+from app.model import GPT
+from app.train import get_device
 
 
 DEFAULT_PROMPTS = [

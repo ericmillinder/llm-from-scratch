@@ -1,4 +1,3 @@
-# pip install matplotlib
 import matplotlib.pyplot as plt
 from json import load
 

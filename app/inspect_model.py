@@ -8,8 +8,8 @@ import numpy as np
 import tiktoken
 import torch
 
-from model import GPT
-from train import get_device
+from app.model import GPT
+from app.train import get_device
 
 try:
     import matplotlib.pyplot as plt
